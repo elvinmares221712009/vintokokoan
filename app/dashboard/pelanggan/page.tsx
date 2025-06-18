@@ -3,7 +3,7 @@ import Search from '@/app/ui/search';
 import PelangganTable from '@/app/ui/pelanggan/table'; 
 import { CreatePelanggan } from '@/app/ui/pelanggan/button';
 import { lusitana, kanit } from '@/app/ui/fonts';
-import { PelangganTableSkeleton, LatestPelangganSkeleton } from '@/app/ui/skeletons';
+import { PelangganTableSkeleton } from '@/app/ui/skeletons';
 import { Suspense } from 'react';
 import { fetchPelangganPage } from '@/app/lib/data';
 import { Metadata } from 'next';
@@ -21,12 +21,10 @@ export default async function Page({
     page?: string;
   };
 }) {
-  
   const query = searchParams?.query || '';
   const currentPage = Number(searchParams?.page) || 1;
 
   const totalPages = await fetchPelangganPage(query, currentPage);
-  await new Promise((resolve) => setTimeout(resolve, 2000));
 
   return (
     <div className="w-full">
@@ -37,24 +35,17 @@ export default async function Page({
         </div>
       </header>
       <div className="flex w-full items-center justify-between">
-        <h1 className={`${lusitana.className} text-2xl`}>
-        </h1>
+        <h1 className={`${lusitana.className} text-2xl`}></h1>
       </div>
       <div className="mt-4">
-        <Suspense fallback={<PelangganTableSkeleton />}>
-          <div className="flex justify-between items-center mb-4">
-            <Suspense fallback={<LatestPelangganSkeleton />}>
-              <Search placeholder="Search Pelanggan..." />
-            </Suspense>
-            <Suspense fallback={<LatestPelangganSkeleton />}>
-              <CreatePelanggan />
-            </Suspense>
-          </div>
-        </Suspense>
+        <div className="flex items-center justify-between gap-2 md:mt-8">
+          <Search placeholder="Search pelanggan..." />
+          <CreatePelanggan />
+        </div>
         <Suspense key={query + currentPage} fallback={<PelangganTableSkeleton />}>
-          <PelangganTable query={query} currentPage={currentPage} /> 
+          <PelangganTable query={query} currentPage={currentPage} />
         </Suspense>
-        <div className="mt-4 flex justify-center">
+        <div className="mt-5 flex w-full justify-center">
           <Pagination totalPages={totalPages} />
         </div>
       </div>

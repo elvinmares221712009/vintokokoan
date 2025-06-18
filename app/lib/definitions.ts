@@ -135,6 +135,8 @@ export type PelangganField = {
 };
 
 export type PelangganForm = {
+  message: any;
+  errors: any;
   id: string;
   nama: string;
   email: string;

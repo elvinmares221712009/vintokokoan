@@ -8,7 +8,7 @@ import Search from '@/app/ui/search';
 import MemberTable from '@/app/ui/member/table'; 
 import { CreateMember } from '@/app/ui/member/button';
 import { lusitana, kanit } from '@/app/ui/fonts';
-import { MemberTableSkeleton, LatestPelangganSkeleton } from '@/app/ui/skeletons';
+import { MemberTableSkeleton } from '@/app/ui/skeletons';
 import { Suspense } from 'react';
 import { fetchMemberPages } from '@/app/lib/data';
 import { Metadata } from 'next';
@@ -26,12 +26,10 @@ export default async function Page({
     page?: string;
   };
 }) {
-  
   const query = searchParams?.query || '';
   const currentPage = Number(searchParams?.page) || 1;
 
   const totalPages = await fetchMemberPages(query, currentPage);
-  await new Promise((resolve) => setTimeout(resolve, 2000));
 
   return (
     <div className="w-full">
@@ -53,20 +51,14 @@ export default async function Page({
         </h1>
       </div>
       <div className="mt-4">
-        <Suspense fallback={<MemberTableSkeleton />}>
-          <div className="flex justify-between items-center mb-4">
-            <Suspense fallback={<LatestPelangganSkeleton />}>
-              <Search placeholder="Search Member..." />
-            </Suspense>
-            <Suspense fallback={<LatestPelangganSkeleton />}>
-              <CreateMember />
-            </Suspense>
-          </div>
-        </Suspense>
+        <div className="flex items-center justify-between gap-2 md:mt-8">
+          <Search placeholder="Search member..." />
+          <CreateMember />
+        </div>
         <Suspense key={query + currentPage} fallback={<MemberTableSkeleton />}>
           <MemberTable query={query} currentPage={currentPage} /> 
         </Suspense>
-        <div className="mt-4 flex justify-center">
+        <div className="mt-5 flex w-full justify-center">
           <Pagination totalPages={totalPages} />
         </div>
       </div>

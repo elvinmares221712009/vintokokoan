@@ -22,16 +22,66 @@ export async function fetchRevenue() {
 
   try {
     console.log('Fetching revenue data...');
-    await new Promise((resolve) => setTimeout(resolve, 3000));
 
-    const data = await sql<Revenue>`SELECT * FROM revenue`;
+    // First, check if we have any orders
+    const orderCount = await sql`SELECT COUNT(*) as count FROM orders`;
+    const hasOrders = orderCount.rows[0].count > 0;
 
-    console.log('Data fetch completed after 3 seconds.');
+    if (!hasOrders) {
+      // Return sample data if no orders exist
+      return [
+        { month: 'January', revenue: 0 },
+        { month: 'February', revenue: 0 },
+        { month: 'March', revenue: 0 },
+        { month: 'April', revenue: 0 },
+        { month: 'May', revenue: 0 },
+        { month: 'June', revenue: 0 },
+      ];
+    }
+
+    const data = await sql<Revenue>`
+      WITH RECURSIVE months AS (
+        SELECT 
+          DATE_TRUNC('month', NOW()) as month
+        UNION ALL
+        SELECT 
+          DATE_TRUNC('month', month - INTERVAL '1 month')
+        FROM months
+        WHERE month > NOW() - INTERVAL '6 months'
+      ),
+      monthly_revenue AS (
+        SELECT
+          DATE_TRUNC('month', order_date) as month,
+          SUM(total_amount) as revenue
+        FROM orders
+        WHERE status = 'completed'
+          AND order_date >= NOW() - INTERVAL '6 months'
+        GROUP BY DATE_TRUNC('month', order_date)
+      )
+      SELECT
+        TO_CHAR(m.month, 'Month') as month,
+        COALESCE(mr.revenue, 0) as revenue
+      FROM months m
+      LEFT JOIN monthly_revenue mr ON m.month = mr.month
+      ORDER BY m.month ASC
+      LIMIT 6;
+    `;
+
+    console.log('Revenue data:', data.rows);
 
     return data.rows;
   } catch (error) {
     console.error('Database Error:', error);
-    throw new Error('Failed to fetch revenue data.');
+    
+    // Return sample data as fallback
+    return [
+      { month: 'January', revenue: 0 },
+      { month: 'February', revenue: 0 },
+      { month: 'March', revenue: 0 },
+      { month: 'April', revenue: 0 },
+      { month: 'May', revenue: 0 },
+      { month: 'June', revenue: 0 },
+    ];
   }
 }
 
@@ -39,15 +89,17 @@ export async function fetchLatestPesanan() {
   noStore();
   try {
     const data = await sql<LatestPesananRaw>`
-      SELECT pesanan.total_harga, pelanggan.nama, pelanggan.image_url, pelanggan.email, pesanan.id
-      FROM pesanan
-      JOIN pelanggan ON pesanan.pelanggan_id = pelanggan.id
-      ORDER BY pesanan.tanggal_pesanan DESC
+      SELECT orders.id as id_pesanan, orders.total_amount as total_harga, 
+             members.name as nama, members.email, members.id as member_id
+      FROM orders
+      JOIN members ON orders.member_id = members.id
+      ORDER BY orders.order_date DESC
       LIMIT 5`;
 
     const latestPesanan = data.rows.map((pesanan) => ({
       ...pesanan,
       total_harga: formatCurrency(pesanan.total_harga),
+      image_url: '/customers/default.png' // Add a default image since members table doesn't have images
     }));
     return latestPesanan;
   } catch (error) {
@@ -59,26 +111,52 @@ export async function fetchLatestPesanan() {
 export async function fetchCardData() {
   noStore();
   try {
-    const pesananCountPromise = sql`SELECT COUNT(*) FROM pesanan`;
-    const pelangganCountPromise = sql`SELECT COUNT(*) FROM pelanggan`;
-    const memberCountPromise = sql`SELECT COUNT(*) FROM member`;
-    const pesananStatusPromise = sql`SELECT
-         SUM(CASE WHEN status_pesanan = 'completed' THEN total_harga ELSE 0 END) AS "completed",
-         SUM(CASE WHEN status_pesanan = 'pending' THEN total_harga ELSE 0 END) AS "pending"
-         FROM pesanan`;
+    // Debug: Get all tables
+    const tables = await sql`
+      SELECT table_name 
+      FROM information_schema.tables 
+      WHERE table_schema = 'public'
+    `;
+    console.log('Available tables:', tables.rows);
 
+    const ordersData = await sql`SELECT * FROM orders`;
+    console.log('Orders data:', ordersData.rows);
+
+    const membersData = await sql`SELECT * FROM members`;
+    console.log('Members data:', membersData.rows);
+
+    // Execute all queries in parallel
     const data = await Promise.all([
-      pesananCountPromise,
-      pelangganCountPromise,
-      memberCountPromise,
-      pesananStatusPromise,
+      // Count orders
+      sql`SELECT COUNT(*)::integer as count FROM orders`,
+      
+      // Count members
+      sql`SELECT COUNT(*)::integer as count FROM members`,
+      
+      // Count member status (using members table instead)
+      sql`SELECT COUNT(*)::integer as count FROM members`,
+      
+      // Sum order amounts by status
+      sql`
+        SELECT
+          COALESCE(SUM(CASE WHEN status = 'completed' THEN total_amount ELSE 0 END), 0) AS completed,
+          COALESCE(SUM(CASE WHEN status = 'pending' THEN total_amount ELSE 0 END), 0) AS pending
+        FROM orders
+      `
     ]);
 
-    const numberOfPesanan = Number(data[0].rows[0].count ?? '0');
-    const numberOfPelanggan = Number(data[1].rows[0].count ?? '0');
-    const numberOfMember = Number(data[2].rows[0].count ?? '0');
-    const totalPaidPesanan = formatCurrency(data[3].rows[0].completed ?? '0');
-    const totalPendingPesanan = formatCurrency(data[3].rows[0].pending ?? '0');
+    console.log('Query results:', {
+      orders: data[0].rows[0],
+      members: data[1].rows[0],
+      memberStatus: data[2].rows[0],
+      amounts: data[3].rows[0]
+    });
+
+    const numberOfPesanan = data[0].rows[0]?.count ?? 0;
+    const numberOfPelanggan = data[1].rows[0]?.count ?? 0;
+    const numberOfMember = data[2].rows[0]?.count ?? 0;
+    const totalPaidPesanan = formatCurrency(data[3].rows[0]?.completed ?? 0);
+    const totalPendingPesanan = formatCurrency(data[3].rows[0]?.pending ?? 0);
 
     return {
       numberOfPelanggan,
@@ -87,9 +165,13 @@ export async function fetchCardData() {
       totalPaidPesanan,
       totalPendingPesanan,
     };
-  } catch (error) {
-    console.error('Database Error:', error);
-    throw new Error('Failed to fetch card data.');
+  } catch (error: any) {
+    console.error('Database Error:', {
+      name: error?.name,
+      message: error?.message,
+      stack: error?.stack
+    });
+    throw new Error('Failed to fetch card data. See server logs for details.');
   }
 }
 
@@ -103,27 +185,30 @@ export async function fetchFilteredPesanan(query: string, currentPage: number) {
   try {
     const data = await sql<PesananTable>`
       SELECT
-        pesanan.id,
-        pesanan.total_harga,
-        pesanan.tanggal_pesanan,
-        pesanan.status_pesanan,
-        pelanggan.nama,
-        pelanggan.email,
-        products.nama_produk,
-        pelanggan.image_url
-      FROM pesanan
-      JOIN pelanggan ON pesanan.pelanggan_id = pelanggan.id
-      JOIN products ON pesanan.product_id = products.id
+        orders.id,
+        orders.total_amount as total_harga,
+        orders.order_date as tanggal_pesanan,
+        orders.status as status_pesanan,
+        members.name as nama,
+        members.email,
+        products.name as nama_produk,
+        '/customers/default.png' as image_url
+      FROM orders
+      JOIN members ON orders.member_id = members.id
+      JOIN order_details ON orders.id = order_details.order_id
+      JOIN products ON order_details.product_id = products.id
       WHERE
-        pelanggan.nama ILIKE ${`%${query}%`} OR
-        pelanggan.email ILIKE ${`%${query}%`} OR
-        products.nama_produk ILIKE ${`%${query}%`} OR
-        pesanan.total_harga::text ILIKE ${`%${query}%`} OR
-        pesanan.tanggal_pesanan::text ILIKE ${`%${query}%`} OR
-        pesanan.status_pesanan ILIKE ${`%${query}%`}
-      ORDER BY pesanan.tanggal_pesanan DESC
+        members.name ILIKE ${`%${query}%`} OR
+        members.email ILIKE ${`%${query}%`} OR
+        products.name ILIKE ${`%${query}%`} OR
+        orders.total_amount::text ILIKE ${`%${query}%`} OR
+        orders.order_date::text ILIKE ${`%${query}%`} OR
+        orders.status ILIKE ${`%${query}%`}
+      GROUP BY orders.id, members.name, members.email, products.name
+      ORDER BY orders.order_date DESC
       LIMIT ${ITEMS_PER_PAGE} OFFSET ${offset}
     `;
+
     const pesanan = data.rows.map((item) => ({
       ...item,
       total_harga: formatCurrency(item.total_harga),
@@ -138,19 +223,19 @@ export async function fetchFilteredPesanan(query: string, currentPage: number) {
 
 export async function fetchPesananPages(query: string, currentPage: number) {
   noStore();
-  const offset = (currentPage - 1) * ITEMS_PER_PAGE;
   try {
-    const count = await sql`SELECT COUNT(*)
-    FROM pesanan
-    JOIN pelanggan ON pesanan.pelanggan_id = pelanggan.id
-    JOIN products ON pesanan.product_id = products.id
+    const count = await sql`SELECT COUNT(DISTINCT orders.id)
+    FROM orders
+    JOIN members ON orders.member_id = members.id
+    JOIN order_details ON orders.id = order_details.order_id
+    JOIN products ON order_details.product_id = products.id
     WHERE
-      pelanggan.nama ILIKE ${`%${query}%`} OR
-      pelanggan.email ILIKE ${`%${query}%`} OR
-      products.nama_produk ILIKE ${`%${query}%`} OR
-      pesanan.total_harga::text ILIKE ${`%${query}%`} OR
-      pesanan.tanggal_pesanan::text ILIKE ${`%${query}%`} OR
-      pesanan.status_pesanan ILIKE ${`%${query}%`}
+      members.name ILIKE ${`%${query}%`} OR
+      members.email ILIKE ${`%${query}%`} OR
+      products.name ILIKE ${`%${query}%`} OR
+      orders.total_amount::text ILIKE ${`%${query}%`} OR
+      orders.order_date::text ILIKE ${`%${query}%`} OR
+      orders.status ILIKE ${`%${query}%`}
   `;
 
     const totalPages = Math.ceil(Number(count.rows[0].count) / ITEMS_PER_PAGE);
@@ -166,17 +251,17 @@ export async function fetchPesananById(id: string) {
   try {
     const data = await sql<PesananForm>`
       SELECT
-        pesanan.id,
-        pesanan.pelanggan_id,
-        pesanan.total_harga,
-        pesanan.status_pesanan
-      FROM pesanan
-      WHERE pesanan.id = ${id};
+        orders.id,
+        orders.member_id as pelanggan_id,
+        orders.total_amount as total_harga,
+        orders.status as status_pesanan
+      FROM orders
+      WHERE orders.id = ${id};
     `;
 
     const pesanan = data.rows.map((pesanan) => ({
       ...pesanan,
-      total_harga: pesanan.total_harga / 100,
+      total_harga: pesanan.total_harga,
     }));
 
     return pesanan[0];
@@ -186,215 +271,69 @@ export async function fetchPesananById(id: string) {
   }
 }
 
-export async function fetchPelanggan() {
-  noStore();
-  try {
-    const data = await sql<PelangganField>`
-      SELECT
-        id,
-        nama,
-        alamat,
-        nomor_telepon
-      FROM pelanggan
-      ORDER BY nama ASC
-    `;
-
-    const pelanggan = data.rows;
-    return pelanggan;
-  } catch (err) {
-    console.error('Database Error:', err);
-    throw new Error('Failed to fetch all pelanggan.');
-  }
-}
-
-export async function fetchFilteredPelanggan(query: string, currentPage: number) {
-  noStore();
-
-  const itemsPerPage = 6; // Batas jumlah pelanggan per halaman
-  const offset = (currentPage - 1) * itemsPerPage; // Hitung offset berdasarkan halaman saat ini
-
-  try {
-    const data = await sql<Pelanggan>`
-      SELECT
-        pelanggan.id,
-        pelanggan.nama,
-        pelanggan.email,
-        pelanggan.alamat,
-        pelanggan.nomor_telepon,
-        pelanggan.image_url
-      FROM pelanggan
-      WHERE
-        pelanggan.nama ILIKE ${`%${query}%`} OR
-        pelanggan.email ILIKE ${`%${query}%`} OR
-        pelanggan.alamat ILIKE ${`%${query}%`} OR
-        pelanggan.nomor_telepon::text ILIKE ${`%${query}%`}
-      ORDER BY nama ASC
-      LIMIT ${itemsPerPage} OFFSET ${offset}
-    `;
-
-    return data.rows;
-  } catch (err) {
-    console.error('Database Error:', err);
-    throw new Error('Failed to fetch pelanggan table.');
-  }
-}
-
-export async function getUser(email: string) {
-  try {
-    const user = await sql`SELECT * FROM users WHERE email=${email}`;
-    return user.rows[0] as User;
-  } catch (error) {
-    console.error('Failed to fetch user:', error);
-    throw new Error('Failed to fetch user.');
-  }
-}
-
-export async function fetchPelangganPage(query: string, currentPage: number) {
-  noStore();
-  const offset = (currentPage - 1) * ITEMS_PER_PAGE;
-
-  try {
-    const count = await sql`SELECT COUNT(*)
-    FROM pelanggan
-    WHERE
-      nama ILIKE ${`%${query}%`} OR
-      email ILIKE ${`%${query}%`}
-  `;
-
-    const totalPages = Math.ceil(Number(count.rows[0].count) / ITEMS_PER_PAGE);
-    return totalPages;
-  } catch (error) {
-    console.error('Database Error:', error);
-    throw new Error('Failed to fetch total number of pelanggan.');
-  }
-}
-
-export async function fetchPelangganById(id: string) {
-  noStore();
-  try {
-    const data = await sql<PelangganForm>`
-      SELECT
-        pelanggan.id,
-        pelanggan.nama,
-        pelanggan.email,
-        pelanggan.image_url
-      FROM pelanggan
-      WHERE pelanggan.id = ${id};
-    `;
-
-    const pelanggan = data.rows.map((pelanggan) => ({
-      ...pelanggan,
-    }));
-
-    console.log(pelanggan);
-    return pelanggan[0];
-  } catch (error) {
-    console.error('Database Error:', error);
-    throw new Error('Failed to fetch pelanggan.');
-  }
-}
-
-
+// Products functions
 export async function fetchProduk() {
   noStore();
   try {
-    const data = await sql<ProdukField>`
+    const data = await sql`
       SELECT
         id,
-        nama_produk,
-        harga,
-        stok,
-        kategori,
+        name as nama_produk,
+        description as deskripsi,
+        price as harga,
+        stock as stok,
         image_url
       FROM products
-      ORDER BY products.nama_produk ASC
+      ORDER BY name ASC
     `;
- 
-    const products = data.rows;
-    return products;
-  } catch (err) {
-    console.error('Database Error:', err);
+
+    return data.rows;
+  } catch (error) {
+    console.error('Database Error:', error);
     throw new Error('Failed to fetch all produk.');
   }
 }
 
 export async function fetchFilteredProduk(query: string, currentPage: number) {
   noStore();
-
-  const itemsPerPage = 6; // Batas jumlah produk per halaman
-  const offset = (currentPage - 1) * itemsPerPage; // Hitung offset berdasarkan halaman saat ini
+  const offset = (currentPage - 1) * ITEMS_PER_PAGE;
 
   try {
-    const data = await sql<Produk>`
-      SELECT
-      products.id,
-      products.nama_produk,
-      products.harga,
-      products.stok,
-      products.kategori,
-      products.image_url
-      FROM products
-      WHERE
-      products.nama_produk ILIKE ${`%${query}%`} OR
-      products.harga::text ILIKE ${`%${query}%`} OR
-      products.stok::text ILIKE ${`%${query}%`} OR
-      products.kategori ILIKE ${`%${query}%`}
-      ORDER BY products.nama_produk ASC
-      LIMIT ${itemsPerPage} OFFSET ${offset}
-    `;
-
-    const produk = data.rows.map((item) => ({
-      ...item,
-      harga: formatCurrency(item.harga),
-    }));
-
-    return produk;
-  } catch (err) {
-    console.error('Database Error:', err);
-    throw new Error('Failed to fetch produk table.');
-  }
-}
-
-export async function fetchProdukById(id: string) {
-  noStore();
-  try {
-    const data = await sql<ProdukForm>`
+    const data = await sql`
       SELECT
         id,
-        nama_produk,
-        harga,
-        stok,
-        kategori,
+        name as nama_produk,
+        description as deskripsi,
+        price as harga,
+        stock as stok,
         image_url
       FROM products
-      WHERE id = ${id};
+      WHERE
+        name ILIKE ${`%${query}%`} OR
+        description ILIKE ${`%${query}%`} OR
+        price::text ILIKE ${`%${query}%`}
+      ORDER BY name ASC
+      LIMIT ${ITEMS_PER_PAGE} OFFSET ${offset}
     `;
 
-    const products = data.rows.map((products) => ({
-      ...products,
-      harga: products.harga / 100, // Format harga jika diperlukan
-    }));
-    console.log(products);
-    return products[0];
+    return data.rows;
   } catch (error) {
     console.error('Database Error:', error);
     throw new Error('Failed to fetch produk.');
   }
 }
 
-
 export async function fetchProdukPages(query: string, currentPage: number) {
   noStore();
-  const offset = (currentPage - 1) * ITEMS_PER_PAGE;
   try {
-    const count = await sql`SELECT COUNT(*)
-    FROM products
-    WHERE
-      nama_produk ILIKE ${`%${query}%`} OR
-      harga::text ILIKE ${`%${query}%`} OR
-      stok::text ILIKE ${`%${query}%`} OR
-      kategori ILIKE ${`%${query}%`}
-  `;
+    const count = await sql`
+      SELECT COUNT(*)
+      FROM products
+      WHERE
+        name ILIKE ${`%${query}%`} OR
+        description ILIKE ${`%${query}%`} OR
+        price::text ILIKE ${`%${query}%`}
+    `;
 
     const totalPages = Math.ceil(Number(count.rows[0].count) / ITEMS_PER_PAGE);
     return totalPages;
@@ -404,85 +343,202 @@ export async function fetchProdukPages(query: string, currentPage: number) {
   }
 }
 
-
-
-export async function fetchFilteredMember(query: string, currentPage: number) {
-  noStore(); // Pastikan fungsi ini didefinisikan di tempat lain
-  const ITEMS_PER_PAGE = 6; 
-  const offset = (currentPage - 1) * ITEMS_PER_PAGE;
-
+export async function fetchProdukById(id: string) {
+  noStore();
   try {
-    const members = await sql<MemberTable>`
+    const data = await sql`
       SELECT
-        member.id,
-        member.jenis_member,
-        member.tanggal_bergabung,
-        member.status_keanggotaan,
-        pelanggan.nama,
-        pelanggan.email,
-        pelanggan.image_url
-      FROM member
-      JOIN pelanggan ON member.pelanggan_id = pelanggan.id
-      WHERE
-        pelanggan.nama ILIKE ${`%${query}%`} OR
-        pelanggan.email ILIKE ${`%${query}%`} OR
-        member.jenis_member::text ILIKE ${`%${query}%`} OR
-        member.tanggal_bergabung::text ILIKE ${`%${query}%`} OR
-        member.status_keanggotaan::text ILIKE ${`%${query}%`}
-      ORDER BY member.tanggal_bergabung DESC
-      LIMIT ${ITEMS_PER_PAGE} OFFSET ${offset}
+        id,
+        name as nama_produk,
+        description as deskripsi,
+        price as harga,
+        stock as stok,
+        image_url
+      FROM products
+      WHERE id = ${id}
     `;
 
-    return members.rows;
+    return data.rows[0];
   } catch (error) {
     console.error('Database Error:', error);
-    throw new Error('Failed to fetch member.');
+    throw new Error('Failed to fetch produk.');
   }
 }
 
-
-export async function fetchMemberPages(query: string, currentPage: number) {
+// Pelanggan functions
+export async function fetchPelangganPage(query: string, currentPage: number) {
   noStore();
-  const offset = (currentPage - 1) * ITEMS_PER_PAGE;
   try {
-    const count = await sql`SELECT COUNT(*)
-    FROM member
-    JOIN pelanggan ON member.pelanggan_id = pelanggan.id
-    WHERE
-      pelanggan.nama ILIKE ${`%${query}%`} OR
-      pelanggan.email ILIKE ${`%${query}%`} OR
-      member.jenis_member::text ILIKE ${`%${query}%`} OR
-      member.tanggal_bergabung::text ILIKE ${`%${query}%`} OR
-      member.status_keanggotaan ILIKE ${`%${query}%`}
-  `;
+    const count = await sql`
+      SELECT COUNT(*)
+      FROM members
+      WHERE
+        name ILIKE ${`%${query}%`} OR
+        email ILIKE ${`%${query}%`} OR
+        phone ILIKE ${`%${query}%`} OR
+        address ILIKE ${`%${query}%`}
+    `;
 
     const totalPages = Math.ceil(Number(count.rows[0].count) / ITEMS_PER_PAGE);
     return totalPages;
   } catch (error) {
     console.error('Database Error:', error);
-    throw new Error('Failed to fetch total number of member.');
+    throw new Error('Failed to fetch total number of pelanggan.');
+  }
+}
+
+export async function fetchFilteredPelanggan(query: string, currentPage: number) {
+  noStore();
+  const offset = (currentPage - 1) * ITEMS_PER_PAGE;
+
+  try {
+    const data = await sql`
+      SELECT
+        id,
+        name as nama,
+        email,
+        phone as nomor_telepon,
+        address as alamat,
+        '/customers/default.png' as image_url
+      FROM members
+      WHERE
+        name ILIKE ${`%${query}%`} OR
+        email ILIKE ${`%${query}%`} OR
+        phone ILIKE ${`%${query}%`} OR
+        address ILIKE ${`%${query}%`}
+      ORDER BY name ASC
+      LIMIT ${ITEMS_PER_PAGE} OFFSET ${offset}
+    `;
+
+    return data.rows;
+  } catch (error) {
+    console.error('Database Error:', error);
+    throw new Error('Failed to fetch pelanggan.');
+  }
+}
+
+export async function fetchPelanggan() {
+  noStore();
+  try {
+    const data = await sql`
+      SELECT
+        id,
+        name as nama,
+        email,
+        phone as nomor_telepon,
+        address as alamat,
+        '/customers/default.png' as image_url
+      FROM members
+      ORDER BY name ASC
+    `;
+
+    return data.rows;
+  } catch (error) {
+    console.error('Database Error:', error);
+    throw new Error('Failed to fetch all pelanggan.');
+  }
+}
+
+// Member functions
+export async function fetchFilteredMembers(query: string, currentPage: number) {
+  noStore();
+  const offset = (currentPage - 1) * ITEMS_PER_PAGE;
+
+  try {
+    const data = await sql<MemberTable>`
+      WITH member_stats AS (
+        SELECT 
+          member_id,
+          COUNT(*) as total_orders,
+          SUM(total_amount) as total_spent
+        FROM orders
+        GROUP BY member_id
+      )
+      SELECT 
+        m.id,
+        m.name as nama,
+        m.email,
+        '/customers/default.png' as image_url,
+        COALESCE(ms.total_orders, 0) as total_orders,
+        CASE 
+          WHEN ms.total_orders >= 10 OR COALESCE(ms.total_spent, 0) >= 1000 THEN 'Platinum'
+          WHEN ms.total_orders >= 5 OR COALESCE(ms.total_spent, 0) >= 500 THEN 'Gold'
+          ELSE 'Silver'
+        END as jenis_member,
+        m.join_date as tanggal_bergabung,
+        CASE 
+          WHEN m.join_date > NOW() - INTERVAL '3 months' THEN 'Aktif'
+          ELSE 'Tidak Aktif'
+        END as status_keanggotaan
+      FROM members m
+      LEFT JOIN member_stats ms ON m.id = ms.member_id
+      WHERE
+        m.name ILIKE ${`%${query}%`} OR
+        m.email ILIKE ${`%${query}%`}
+      ORDER BY ms.total_orders DESC NULLS LAST, m.name ASC
+      LIMIT ${ITEMS_PER_PAGE} OFFSET ${offset}
+    `;
+
+    return data.rows;
+  } catch (error) {
+    console.error('Database Error:', error);
+    throw new Error('Failed to fetch members.');
+  }
+}
+
+export async function fetchMemberPages(query: string, currentPage: number) {
+  noStore();
+  try {
+    const count = await sql`
+      SELECT COUNT(*)
+      FROM members
+      WHERE
+        name ILIKE ${`%${query}%`} OR
+        email ILIKE ${`%${query}%`}
+    `;
+
+    const totalPages = Math.ceil(Number(count.rows[0].count) / ITEMS_PER_PAGE);
+    return totalPages;
+  } catch (error) {
+    console.error('Database Error:', error);
+    throw new Error('Failed to fetch total number of members.');
   }
 }
 
 export async function fetchMemberById(id: string) {
   noStore();
   try {
-    const data = await sql<MemberForm>`
-      SELECT
-        member.id,
-        member.pelanggan_id,
-        member.jenis_member,
-        member.status_keanggotaan
-      FROM member
-      WHERE member.id = ${id};
+    const data = await sql<MemberTable>`
+      WITH member_stats AS (
+        SELECT 
+          member_id,
+          COUNT(*) as total_orders,
+          SUM(total_amount) as total_spent
+        FROM orders
+        GROUP BY member_id
+      )
+      SELECT 
+        m.id,
+        m.name as nama,
+        m.email,
+        '/customers/default.png' as image_url,
+        COALESCE(ms.total_orders, 0) as total_orders,
+        CASE 
+          WHEN ms.total_orders >= 10 OR COALESCE(ms.total_spent, 0) >= 1000 THEN 'Platinum'
+          WHEN ms.total_orders >= 5 OR COALESCE(ms.total_spent, 0) >= 500 THEN 'Gold'
+          ELSE 'Silver'
+        END as jenis_member,
+        m.join_date as tanggal_bergabung,
+        CASE 
+          WHEN m.join_date > NOW() - INTERVAL '3 months' THEN 'Aktif'
+          ELSE 'Tidak Aktif'
+        END as status_keanggotaan
+      FROM members m
+      LEFT JOIN member_stats ms ON m.id = ms.member_id
+      WHERE m.id = ${id}
     `;
 
-    const member = data.rows.map((member) => ({
-      ...member,
-      
-    }));
-    console.log(member);
-    return member[0];
+    return data.rows[0];
   } catch (error) {
     console.error('Database Error:', error);
     throw new Error('Failed to fetch member.');
